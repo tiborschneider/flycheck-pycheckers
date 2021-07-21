@@ -248,6 +248,15 @@ class LintRunner(object):
         The checker can return None if the file should not be included in the check command."""
         return filepath
 
+    def find_module_root(self, filepath):
+        # type: (str) -> str
+        """Select the last folder (while going back) that still contains ain __init__.py file."""
+        cwd = os.path.dirname(filepath)
+        parent = os.path.dirname(cwd)
+        while os.path.exists(os.path.join(parent, "__init__.py")) and parent != "/":
+            cwd, parent = parent, os.path.dirname(parent)
+        return cwd
+
     def find_project_root(self, filepath):
         # type: (str) -> str
         """Returns the root of the project that filepath belongs to.
@@ -292,6 +301,19 @@ class LintRunner(object):
             return file_path
         return None
 
+    def find_file_backwards(self, directory, filename):
+        # type: (AbsPath, str) -> Optional[AbsPath]
+        """Check if `filename` exists while walking up the tree."""
+        if not directory:
+            return None
+
+        while not os.path.exists(os.path.join(directory, filename)):
+            directory = os.path.dirname(directory)
+            if directory == '/':
+                return None
+        return os.path.join(directory, filename)
+
+
     def find_config_file(self, option_name, config_file_names):
         # type: (str, List[str]) -> Optional[str]
         """Attempt to find a config file -- either specified via the
@@ -305,12 +327,22 @@ class LintRunner(object):
                 raise FatalException(
                     "Can't find config file %s for checker %s" % (config_file, self.name),
                     self._filepath)
-        else:
+
+        if not config_file:
             # Attempt to find one of the `config_file_names` in the project root
             for config_file_name in config_file_names:
                 config_file = self.find_file_in_project_root(config_file_name)
                 if config_file:
                     break
+
+        # attempt to find the file while walking backwards
+        if not config_file:
+            start = os.path.dirname(self._filepath)
+            for config_file_name in config_file_names:
+                config_file = self.find_file_backwards(start, config_file_name)
+                if config_file:
+                    break
+
         return config_file
 
     def user_defined_command_line(self, filepath):
@@ -581,6 +613,11 @@ class PyflakesRunner(LintRunner):
 
         return data
 
+    def get_filepath(self, filepath):
+        # type: str -> str
+        if self.options.check_module_root:
+            return self.find_module_root(filepath)
+        return filepath
 
 class Flake8Runner(LintRunner):
     """Flake8 has similar output to Pyflakes
@@ -648,9 +685,18 @@ class Flake8Runner(LintRunner):
         args += [
             # TODO: --select, but additive
             # '-select=' + ','.join(self.enable_codes),
-            '--max-line-length', str(self.options.max_line_length),
         ]
+
+        if self.options.max_line_length is not None:
+            args += ['--max-line-length', str(self.options.max_line_length)]
+
         return args
+
+    def get_filepath(self, filepath):
+        # type: str -> str
+        if self.options.check_module_root:
+            return self.find_module_root(filepath)
+        return filepath
 
 
 class Pep8Runner(LintRunner):
@@ -688,8 +734,11 @@ class Pep8Runner(LintRunner):
             '--repeat',
             # TODO: make this additive, not a replacement
             # '--select=' + ','.join(self.enable_codes),
-            '--max-line-length', str(self.options.max_line_length),
         ]
+
+        if self.options.max_line_length is not None:
+            args += ['--max-line-length', str(self.options.max_line_length)]
+
         return args
 
 
@@ -741,10 +790,14 @@ class PylintRunner(LintRunner):
             # This is additive, not replacing
             '--enable=' + ','.join(self.enable_codes),
             '--dummy-variables-rgx=' + '_.*',
-            '--max-line-length', str(self.options.max_line_length),
         ]
-        if self.options.pylint_rcfile:
-            args.extend(['--rcfile', self.options.pylint_rcfile])
+        config_file = self.find_config_file('pylint_rcfile', ['.pylintrc'])
+        if config_file:
+            args += ['--rcfile', config_file]
+
+        if self.options.max_line_length is not None:
+            args += ['--max-line-length', str(self.options.max_line_length)]
+
         return args
 
     def get_env_vars(self):
@@ -758,6 +811,12 @@ class PylintRunner(LintRunner):
         # type: (int) -> bool
         # https://docs.pylint.org/en/1.6.0/run.html, pylint returns a bit-encoded exit code.
         return not (returncode & 1 or returncode & 32)
+
+    def get_filepath(self, filepath):
+        # type: str -> str
+        if self.options.check_module_root:
+            return self.find_module_root(filepath)
+        return filepath
 
 
 class MyPy2Runner(LintRunner):
@@ -919,6 +978,8 @@ class MyPy2Runner(LintRunner):
         """
         if self.options.mypy_use_daemon:
             return None
+        if self.options.check_module_root:
+            return self.find_module_root(filepath)
         return filepath.replace('flycheck_', '')
 
 
@@ -1152,8 +1213,7 @@ def parse_args():
                         default='',
                         help="Comma-separated list of error codes to ignore")
     parser.add_argument('--max-line-length', dest='max_line_length',
-                        default=79, action='store',
-                        help='Maximum line length')
+                        default=None, help='Maximum line length')
     parser.add_argument('--no-merge-configs', dest='merge_configs',
                         action='store_false',
                         help=('Whether to ignore config files found at a '
@@ -1202,6 +1262,9 @@ def parse_args():
                         action='store',
                         help=("Whether to fake failing checkers's STDERR as a reported "
                               "error for easier display."))
+    parser.add_argument('--check-module-root', dest='check_module_root',
+                        action='store_true',
+                        help=('Check the module root instead of individual files.'))
 
     parser.add_argument('--mypy-no-implicit-optional', type=str2bool, default=False,
                         action='store')
