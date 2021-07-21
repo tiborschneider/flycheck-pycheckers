@@ -113,12 +113,12 @@ def croak(msgs, filename):
 class LintRunner(object):
     """Base class provides common functionality to run python code checkers."""
 
-    out_fmt = ("%(level)s %(error_type)s%(error_number)s:"
-               "%(description)s at %(filename)s line %(line_number)s.")
+    out_fmt = (
+        "%(filename)s:%(line_number)s "
+        "%(level)s %(error_type)s%(error_number)s: %(description)s")
     out_fmt_w_col = (
-        "%(level)s %(error_type)s%(error_number)s:"
-        "%(description)s at %(filename)s line %(line_number)s,"
-        "%(column_number)s.")
+        "%(filename)s:%(line_number)s:%(column_number)s "
+        "%(level)s %(error_type)s%(error_number)s: %(description)s")
 
     output_template = dict.fromkeys(
         ('level', 'error_type', 'error_number', 'description',
@@ -383,7 +383,7 @@ class LintRunner(object):
             return args
 
         # `env` to use a virtualenv, if found
-        args = ['/usr/bin/env', self.command]
+        args = [self.command]
         # Get checker arguments
         args.extend(self.get_run_flags(filepath))
         # Get a checker-specific filename, if necessary
@@ -417,6 +417,23 @@ class LintRunner(object):
         """Called to perform any optional cleanups of the parsed data."""
         return data
 
+    def fixup_file_path(self, data, filepath):
+        # type: (Dict[str, str], str) -> Dict[str, str]
+        if not data or not self.options.check_module_root:
+            return data
+        original_filename = data['filename']
+        module_root = self.find_module_root(filepath)
+        if original_filename.startswith(module_root):
+            return data
+        parts = original_filename.split("/")
+        if not parts[0] in module_root:
+            data['filename'] = os.path.join(module_root, original_filename)
+            return data
+        last_match = parts.index(os.path.basename(module_root))
+        data['filename'] = os.path.join(module_root, *parts[last_match + 1:])
+        return data
+    
+
     def process_returncode(self, _returncode):
         # type: (int) -> bool
         """Return True if the checker's returncode indicates successful check, False otherwise"""
@@ -436,6 +453,8 @@ class LintRunner(object):
                     tokens = dict(self.output_template)
                     # Return None from fixup_data to ignore this error
                     fixed_up = self.fixup_data(line, match, filepath)
+                    # fix the file path
+                    fixed_up = self.fixup_file_path(match, filepath)
                     if fixed_up:
                         # Prepend the command name to the description (if
                         # present) so we know which checker threw which error
@@ -488,7 +507,7 @@ class LintRunner(object):
             # Return a parseable error message so the normal parsing mechanism
             # can display it
             return 1, [
-                ('ERROR : {}:Checker not found on PATH, '
+                ('ERROR E0001: {}:Checker not found on PATH, '
                  'unable to check at {} line 1.'.format(
                      self.command, filepath))]
 
@@ -508,6 +527,8 @@ class LintRunner(object):
             print(e)
             return 1, [str(e)]
         try:
+            self.debug('{} pwd: {}'.format(self.name, os.getcwd()))
+            self.debug('{} args: {}'.format(self.name, self.options))
             self.debug('{} command: {}'.format(self.name, ' '.join(args)))
             process = Popen(
                 args, stdout=PIPE, stderr=PIPE, universal_newlines=True,
@@ -527,12 +548,12 @@ class LintRunner(object):
         if not self.process_returncode(process.returncode):
             errors_or_warnings += 1
             out_lines += [
-                ('WARNING : {}:Checker indicated failure of some kind at {} line 1.'.format(
-                    self.command, filepath))]
+                ('{}:1 WARNING W0001: {}: Checker indicated failure of some kind.'.format(
+                    filepath, self.command))]
             if self.options.report_checker_errors_inline:
                 for line in err.splitlines():
-                    out_lines += ['WARNING : {}:{} at {} line 1.'.format(
-                        self.command, line, filepath)]
+                    out_lines += ['{}:1 WARNING W0001: {}: {}'.format(
+                        filepath, self.command, line)]
 
         et = time.time()
         self.debug('Start: %.2fs  end: %.2fs  duration: %.2fs' % (st, et, (et-st)))
@@ -540,8 +561,8 @@ class LintRunner(object):
         if self.options.debug:
             debug_output = self._get_debug_output()
             errors_or_warnings += len(debug_output)
-            out_lines += ['INFO : {}:{} at {} line 1.'.format(
-                self.command, line, filepath) for line in debug_output]
+            out_lines += ['{}:1 INFO D0001: {}: {}'.format(
+                filepath, self.command, line) for line in debug_output]
 
         return errors_or_warnings, out_lines
 
@@ -593,6 +614,8 @@ class PyflakesRunner(LintRunner):
         r'(?P<line_number>[^:]+):'
         r'(?P<description>.+)$')
 
+    runs_from_project_root = True
+
     @classmethod
     def fixup_data(cls, _line, data, _filepath):
         # type: (str, Dict[str, str], str) -> Dict[str, str]
@@ -635,6 +658,8 @@ class Flake8Runner(LintRunner):
     version_matcher = re.compile(
         r'(?P<version>[0-9.]+).*'
     )
+
+    runs_from_project_root = True
 
     @classmethod
     def fixup_data(cls, _line, data, _filepath):
@@ -762,6 +787,8 @@ class PylintRunner(LintRunner):
         r'\s*(?P<context>[^\]]*)\]'
         r'\s*(?P<description>.*)$')
 
+    runs_from_project_root = True
+
     @classmethod
     def fixup_data(cls, _line, data, _filepath):
         # type: (str, Dict[str, str], str) -> Dict[str, str]
@@ -771,11 +798,8 @@ class PylintRunner(LintRunner):
             data['level'] = 'WARNING'
 
         if data.get('symbol'):
-            data['description'] += '  ("{}")'.format(data['symbol'])
+            data['description'] += '  ({})'.format(data['symbol'])
 
-        # Pylint column numbers are off by one
-        if data.get('column_number') is not None:
-            data['column_number'] = str(int(data['column_number']) + 1)
         return data
 
     def get_run_flags(self, _filepath):
@@ -830,13 +854,7 @@ class MyPy2Runner(LintRunner):
             return 'dmypy'
         return 'mypy'
 
-    @property
-    def runs_from_project_root(self):  # type: ignore
-        # type: () -> bool
-        # In daemon mode we run a single command at project
-        # root that checks everything.
-        return self.options.mypy_use_daemon
-
+    runs_from_project_root = True
 
     output_matcher = re.compile(
         r'(?P<filename>[^:]+):'
@@ -916,7 +934,8 @@ class MyPy2Runner(LintRunner):
         # respect per-file mypy.ini config options
         # TODO: only do this when being run by flycheck?
         if not daemon_mode:
-            flags += ['--shadow-file', filepath, original_filepath]
+            if not self.options.check_module_root:
+                flags += ['--shadow-file', filepath, original_filepath]
         else:
             # For daemon mode we have to pass all python files we want it
             # to consider explicitly (it can't do its normal follow imports
@@ -941,28 +960,29 @@ class MyPy2Runner(LintRunner):
     def fixup_data(self, _line, data, filepath):
         # type: (str, Dict[str, str], str) -> Dict[str, str]
 
-        # Mypy returns lines for files other than the current one -- filter
-        # those out. Since we may be using the --shadow-file option, check for
-        # the original filename, not the flycheck-munged one
-        original_filename = os.path.basename(filepath).replace('flycheck_', '')
-        original_filepath = RootRelativePath(os.path.join(os.path.dirname(filepath), original_filename))
-        if str(original_filename) not in data['filename']:
-            return {}
+        if not self.options.check_module_root:
+            # Mypy returns lines for files other than the current one -- filter
+            # those out. Since we may be using the --shadow-file option, check for
+            # the original filename, not the flycheck-munged one
+            original_filename = os.path.basename(filepath).replace('flycheck_', '')
+            original_filepath = RootRelativePath(os.path.join(os.path.dirname(filepath), original_filename))
+            if str(original_filename) not in data['filename']:
+                return {}
 
-        # That wasn't enough, though -- we've just filtered by the basename, so even if
-        # we're trying to check affirm-users/affirm/users/controllers/user.py, we'll get
-        # errors for affirm-users/affirm/users/models/user.py.
+            # That wasn't enough, though -- we've just filtered by the basename, so even if
+            # we're trying to check affirm-users/affirm/users/controllers/user.py, we'll get
+            # errors for affirm-users/affirm/users/models/user.py.
 
-        # We may have a partial (root-relative) path in `data`, and potentially an
-        # absolute path in `filepath`. Or some other mixture. Longer-term, we need to have
-        # better typing around all these paths so we know what we're dealing with. For
-        # now, we can ensure that data['filename'] is a substring of filepath (or
-        # vice-versa, just in case?)
+            # We may have a partial (root-relative) path in `data`, and potentially an
+            # absolute path in `filepath`. Or some other mixture. Longer-term, we need to have
+            # better typing around all these paths so we know what we're dealing with. For
+            # now, we can ensure that data['filename'] is a substring of filepath (or
+            # vice-versa, just in case?)
 
-        if str(original_filepath) not in data['filename'] and data['filename'] not in str(original_filepath):
-            return {}
+            if str(original_filepath) not in data['filename'] and data['filename'] not in str(original_filepath):
+                return {}
 
-        data['filename'] = os.path.basename(original_filename)
+            data['filename'] = os.path.basename(original_filename)
 
         data['level'] = data['level'].upper()
         if data['level'] == 'NOTE':
@@ -976,10 +996,10 @@ class MyPy2Runner(LintRunner):
         Also, in daemon mode we don't pass a path at all (the daemon command includes
         all project files)
         """
-        if self.options.mypy_use_daemon:
-            return None
         if self.options.check_module_root:
             return self.find_module_root(filepath)
+        if self.options.mypy_use_daemon:
+            return None
         return filepath.replace('flycheck_', '')
 
 

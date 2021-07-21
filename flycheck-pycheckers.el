@@ -111,6 +111,9 @@
 ;; * `flycheck-pycheckers-venv-root' - a directory containing Python virtual
 ;;   environments, so that imports may be found.
 ;;
+;; * `flycheck-pycheckers-check-module-root' - whether to run the checkers in
+;;   the module root, instead of the individual file.
+;;
 ;; Additionally, a `.pycheckers' file may be created in a directory to control
 ;; options for every file under this directory.  These files may be logically
 ;; combined, so a project may have one set of options that may be selectively
@@ -158,6 +161,10 @@
 ;;
 ;; * `flake8_config_file' - the location of a project-specific configuration file
 ;;   for flake8
+;;
+;; * `check-module-root' - whether to run the checkers in the module root,
+;;   instead of the individual file.  This will change the behvaior of flake8
+;;   pyflakes, mypy and pylint.
 
 ;;; Code:
 (require 'flycheck)
@@ -171,9 +178,10 @@
 
 ;;; TODO: flycheck doesn't seem to support multiple config files -- work around
 ;;; this
-(flycheck-def-config-file-var flycheck-pycheckers-pylintrc python-pycheckers
-  ".pylintrc"
-  :safe #'stringp)
+(flycheck-def-option-var flycheck-pycheckers-pylintrc ".pylintrc" python-pycheckers
+  "pylint config file"
+  :type '(choice (const :tag "auto" nil)
+                 (string :tag "set")))
 
 (flycheck-def-option-var flycheck-pycheckers-checkers '(pylint mypy2 mypy3) python-pycheckers
   "The set of enabled checkers to run."
@@ -215,10 +223,11 @@ for example.  Can be further customized via the \".pycheckers\"
 config file."
   :type '(repeat :tag "Codes" (string :tag "Error/Warning code")))
 
-(flycheck-def-option-var flycheck-pycheckers-max-line-length 79
+(flycheck-def-option-var flycheck-pycheckers-max-line-length nil
   python-pycheckers
   "The maximum line length allowed by the checkers."
-  :type 'integer)
+  :type '(choice (const :tag "unset" nil)
+                 (integer :tag "set")))
 
 (flycheck-def-option-var flycheck-pycheckers-multi-thread "true"
     python-pycheckers
@@ -226,10 +235,11 @@ config file."
   :type '(radio (const :tag "Multi-threaded" "true")
           (const :tag "Single-threaded" "false")))
 
-(flycheck-def-option-var flycheck-pycheckers-venv-root "~/.virtualenvs"
+(flycheck-def-option-var flycheck-pycheckers-venv-root nil
    python-pycheckers
    "Directory containing the collection of virtual environments."
-   :type 'string)
+   :type '(choice (const :tag "unset" nil)
+                  (integer :tag "set")))
 
 (flycheck-def-option-var flycheck-pycheckers-report-errors-inline "true"
    python-pycheckers
@@ -241,6 +251,15 @@ e.g. https://github.com/msherry/flycheck-pycheckers/issues/6,
 this will report the error in the `flycheck-list-errors' buffer."
    :type '(radio (const :tag "Yes" "true")
            (const :tag "No" "false")))
+
+(flycheck-def-option-var flycheck-pycheckers-check-module-root nil
+   python-pycheckers
+   "Whether to run checkers on the module root instead of the files.
+
+This argument only has an effect on flake8, pyflakes, mypy and pylint.
+The checkers are called on the project root, instead of the file that
+is currently checked."
+  :type 'boolean)
 
 (flycheck-define-command-checker 'python-pycheckers
   "Multiple python syntax checker.
@@ -262,24 +281,28 @@ per-directory."
                      (concat "--enable-codes=" (when (listp flycheck-pycheckers-enable-codes)
                                                  (mapconcat 'identity flycheck-pycheckers-enable-codes ",")))))
              "--checkers" (eval (mapconcat #'symbol-name flycheck-pycheckers-checkers ","))
-             (option "--max-line-length" flycheck-pycheckers-max-line-length nil number-to-string)
+             (eval (when flycheck-pycheckers-max-line-length
+                     (format "--max-line-length=%d" flycheck-pycheckers-max-line-length)))
              (option "--multi-thread" flycheck-pycheckers-multi-thread)
              (option "--venv-root" flycheck-pycheckers-venv-root)
+             (eval (when flycheck-pycheckers-check-module-root
+                     "--check-module-root"))
              (option "--report-checker-errors-inline" flycheck-pycheckers-report-errors-inline)
-             (config-file "--pylint-rcfile" flycheck-pycheckers-pylintrc)
+             (eval (when flycheck-pycheckers-pylintrc
+                     (format "--max-line-length=%s" flycheck-pycheckers-pylintrc)))
              ;; Need `source-inplace' for relative imports (e.g. `from .foo
              ;; import bar'), see https://github.com/flycheck/flycheck/issues/280
              source-inplace)
   :error-patterns
-  '((error line-start
-     "ERROR " (optional (id (one-or-more (not (any ":"))))) ":"
-     (message) " at " (file-name) " line " line (optional "," column) "." line-end)
-    (warning line-start
-     "WARNING " (optional (id (one-or-more (not (any ":"))))) ":"
-     (message) " at " (file-name) " line " line (optional "," column) "." line-end)
-    (info line-start
-     "INFO " (optional (id (one-or-more (not (any ":"))))) ":"
-     (message) " at " (file-name) " line " line (optional "," column) "." line-end))
+  '((error
+     line-start (file-name) ":" line (optional ":" column) " "
+     "ERROR " (optional (id (one-or-more (not (any ":"))))) ": " (message) line-end)
+    (warning
+     line-start (file-name) ":" line (optional ":" column) " "
+     "WARNING " (optional (id (one-or-more (not (any ":"))))) ": " (message) line-end)
+    (info
+     line-start (file-name) ":" line (optional ":" column) " "
+     "INFO " (optional (id (one-or-more (not (any ":"))))) ": " (message) line-end))
   :modes 'python-mode)
 
 (defun flycheck-pycheckers-unsetup ()
