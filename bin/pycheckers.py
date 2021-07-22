@@ -564,6 +564,9 @@ class LintRunner(object):
             out_lines += ['{}:1 INFO D0001: {}: {}'.format(
                 filepath, self.command, line) for line in debug_output]
 
+        for line in out_lines:
+            print(line)
+
         return errors_or_warnings, out_lines
 
     def debug(self, line):
@@ -1348,7 +1351,7 @@ def main():
 
     for out_lines in out_lines_list:
         for line in out_lines:
-            print(line)
+            #print(line)
 
     sys.exit(errors_or_warnings > 0)
 
